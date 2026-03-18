@@ -10,28 +10,24 @@ public class TrackingLogic
     private readonly IEmailService _email;
     private readonly BotConfig _cfg;
     private readonly ILogger<TrackingLogic>? _logger;
-    private bool _initialized = false;
 
     public TrackingLogic(AppDb db, IEmailService email, IOptions<BotConfig> cfg, ILogger<TrackingLogic>? logger = null)
     {
-        _db = db; _email = email; _cfg = cfg.Value; _logger = logger;
+        _db = db;
+        _email = email;
+        _cfg = cfg.Value;
+        _logger = logger;
     }
 
     public async Task ProcessTickAsync()
     {
-        if (!_initialized)
-        {
-            _logger?.LogInformation("Первая инициализация TrackingLogic");
-            _initialized = true;
-        }
-
         var now = DateTime.Now;
-        _logger?.LogDebug("[TICK] {Now} — начало", now);
-        _logger?.LogDebug("Время: {Time}, WorkStart={Start}, WorkEnd={End}", now.TimeOfDay, _cfg.WorkStart, _cfg.WorkEnd);
+        _logger?.LogDebug("[TICK] {0}. Начало нового опроса", now);
+        _logger?.LogDebug("График пользователя: WorkStart={0}, WorkEnd={1}, LunchStart={2}, LunchEnd={3}", _cfg.WorkStart, _cfg.WorkEnd, _cfg.LunchStart, _cfg.LunchEnd);
 
         if (!IsWorkTime(now))
         {
-            _logger?.LogDebug("Вне рабочего времени");
+            _logger?.LogDebug("Опрос не будет выполнен, причина - у пользователя нерабочее время");
             return;
         }
 
@@ -42,12 +38,24 @@ public class TrackingLogic
             _db.States.Add(state);
             await _db.SaveChangesAsync();
 
-            _logger?.LogDebug("[STATE] Создано новое");
+            _logger?.LogDebug("[STATE] Создана новая запись состояния");
+        }
+
+        if (state.ActiveSessionId.HasValue)
+        {
+            var session = await _db.Sessions.FindAsync(state.ActiveSessionId.Value);
+            if (session != null && session.Date != DateTime.Today)
+            {
+                _logger?.LogWarning("Обнаружена сессия #{Id} за предыдущий день ({Date}). Производится сброс сессии.", session.Id, session.Date);
+
+                state.ActiveSessionId = null;
+                await _db.SaveChangesAsync();
+            }
         }
 
         if (state.IsPaused)
         {
-            _logger?.LogDebug("На паузе");
+            _logger?.LogDebug("[STATE] На паузе");
 
             if (state.ActiveSessionId.HasValue)
             {
@@ -61,16 +69,24 @@ public class TrackingLogic
         var (hasResponse, answer, received) = await _email.CheckNewAsync(_cfg.TargetEmail, state.LastPromptTime);
         _logger?.LogDebug("Результат: HasNew={HasNew}, Answer=\"{Answer}\"", hasResponse, answer?.Substring(0, Math.Min(30, answer?.Length ?? 0)));
 
-        if (hasResponse && !string.IsNullOrEmpty(answer))
+        try
         {
-            await HandleResponseAsync(state, answer.Trim(), received);
-        }
-        else
-        {
-            if (state.ActiveSessionId.HasValue)
-                await UpdateSessionDurationAsync(state.ActiveSessionId.Value, now);
+            if (hasResponse && !string.IsNullOrEmpty(answer))
+            {
+                await HandleResponseAsync(state, answer.Trim(), received);
+            }
+            else
+            {
+                if (state.ActiveSessionId.HasValue)
+                    await UpdateSessionDurationAsync(state.ActiveSessionId.Value, now);
 
-            await PromptUserAsync(state, now);
+                await PromptUserAsync(state, now);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "Ошибка обработки ответа: {Answer}", answer);
+            return;
         }
 
         state.LastPromptTime = now;
@@ -94,6 +110,7 @@ public class TrackingLogic
                 await CloseSessionAsync(state.ActiveSessionId.Value, received);
                 state.ActiveSessionId = null;
             }
+
             state.IsPaused = true;
             await _email.SendAsync(_cfg.TargetEmail, "TimeBot", "Учет приостановлен. Напишите «продолжи» для возобновления.");
             return;
@@ -106,11 +123,30 @@ public class TrackingLogic
             return;
         }
 
-        if (answer.Length < 3 || answer.Contains("не может быть отправлено") ||
-            answer.Contains("mailer-daemon") || answer.Contains("delivery failed"))
+        if ((!answer.StartsWith("#") && answer.Length < 3) ||
+            answer.Contains("не может быть отправлено") ||
+            answer.Contains("mailer-daemon") ||
+            answer.Contains("delivery failed"))
         {
             _logger?.LogWarning("Игнорирован невалидный ответ: \"{Answer}\"", answer);
             return;
+        }
+
+        if (cmd is "да" or "yes" or "продолжить" or "continue")
+        {
+            if (state.ActiveSessionId.HasValue)
+            {
+                var details = await GetSessionDetailsAsync(state.ActiveSessionId.Value);
+                await _email.SendAsync(_cfg.TargetEmail, "✅ TimeBot", $"Продолжаем: {details}");
+                _logger?.LogDebug("Пользователь подтвердил продолжение сессии #{Id}", state.ActiveSessionId.Value);
+
+                return;
+            }
+            else
+            {
+                await PromptUserAsync(state, received);
+                return;
+            }
         }
 
         if (state.ActiveSessionId.HasValue)
@@ -132,6 +168,40 @@ public class TrackingLogic
             }
         }
 
+        if (answer.StartsWith("#") && int.TryParse(answer.Trim('#'), out var dailyIndex))
+        {
+            var todaysSessions = await GetTodaysSessionsAsync();
+            if (dailyIndex > 0 && dailyIndex <= todaysSessions.Count)
+            {
+                var templateSession = todaysSessions[dailyIndex - 1];
+                _logger?.LogDebug("Копирование сессии по индексу: #{Index} → TemplateId={Id}", dailyIndex, templateSession.Id);
+
+                var newSession = new TaskSession
+                {
+                    Project = templateSession.Project,
+                    Stage = templateSession.Stage,
+                    TaskName = templateSession.TaskName,
+                    Start = received,
+                    End = received,
+                    DurationSeconds = 0,
+                    Date = today
+                };
+
+                _db.Sessions.Add(newSession);
+                state.ActiveSessionId = newSession.Id;
+                state.IsPaused = false;
+
+                await _db.SaveChangesAsync();
+                await _email.SendAsync(_cfg.TargetEmail, "✅ TimeBot", $"Возобновлён учёт: {newSession.Project}.{newSession.Stage}.{newSession.TaskName}");
+            }
+            else
+            {
+                _logger?.LogWarning("Неверный индекс задачи: {Index}", dailyIndex);
+            }
+
+            return;
+        }
+
         var parts = answer.Split('.', StringSplitOptions.RemoveEmptyEntries);
         var session = new TaskSession
         {
@@ -148,41 +218,34 @@ public class TrackingLogic
         await _db.SaveChangesAsync();
         state.ActiveSessionId = session.Id;
 
-        _logger?.LogInformation("Новая сессия: {Project}.{Stage}.{TaskName}", session.Project, session.Stage, session.TaskName);
+        _logger?.LogInformation("Создана новая сессия: {Project}.{Stage}.{TaskName}", session.Project, session.Stage, session.TaskName);
     }
 
     private async Task PromptUserAsync(UserState state, DateTime now)
     {
         var today = DateTime.Today;
-        var history = await _db.Sessions
-            .Where(s => s.Date == today)
-            .GroupBy(s => new { s.Project, s.Stage, s.TaskName })
-            .Select(g => new DailyReportRow
-            {
-                Project = g.Key.Project,
-                Stage = g.Key.Stage,
-                Task = g.Key.TaskName,
-                Seconds = g.Sum(x => x.DurationSeconds)
-            })
-            .OrderBy(x => x.Seconds)
-            .ToListAsync();
-
+        var sessions = await GetTodaysSessionsAsync();
         var msg = new StringBuilder();
 
         if (state.ActiveSessionId.HasValue)
         {
             var details = await GetSessionDetailsAsync(state.ActiveSessionId.Value);
-            msg.AppendLine($"⏳ Продолжаем <b>{details}</b>?<br><br>Ответьте: «Да» или укажите новую задачу в формате:<br>Проект.Этап.Задача");
+            msg.AppendLine($"⏳ В данный момент выполняется:<br><b>{details}</b><br>");
+            msg.AppendLine("  <p style='background-color: #e3f2fd; padding: 10px; border-left: 4px solid #2196F3; margin: 20px 0;'>");
+            msg.AppendLine("    <b>Как продолжить задачу:<br></b> нажмите «Ответить» и укажите <b>#номер</b> в теме или тексте письма.<br>");
+            msg.AppendLine("    <i>Пример: напишите «#1» чтобы продолжить первую задачу из списка.</i><br><br>");
+            msg.AppendLine("    <b>Если требуется создать новую задачу:<br></b> нажмите «Ответить» и укажите задачу в формате: <b>Проект.Этап.Задача</b>");
+            msg.AppendLine("  </p>");
         }
         else
         {
             msg.AppendLine("❓ Над какой задачей работаете?<br>Формат: Проект.Этап.Задача");
         }
 
-        if (history.Any())
+        if (sessions.Any())
         {
-            var htmlReportBody = GenerateReportBody(history, false, today);
-            msg.AppendLine($"<br><br>📂 Сегодня уже были:<br>{htmlReportBody}");
+            var htmlReportBody = GenerateReportBody(sessions, false, today);
+            msg.AppendLine($"<br>📂 Сегодня уже были:<br>{htmlReportBody}");
         }
 
         msg.AppendLine("<br><br>💡 Команды: «отчет» — показать статистику, «стоп» — пауза");
@@ -201,8 +264,8 @@ public class TrackingLogic
             {
                 session.DurationSeconds += delta;
                 session.End = now;
-                _db.Update(session);
-                _logger?.LogDebug("Обновлено: +{Seconds}с для сессии #{Id}", delta, sessionId);
+
+                _logger?.LogDebug("Обновлена трудоёмкость: +{Seconds}с для сессии #{Id}", delta, sessionId);
             }
         }
     }
@@ -215,31 +278,24 @@ public class TrackingLogic
 
     private async Task<string> GetSessionDetailsAsync(int id)
     {
-        var s = await _db.Sessions.FindAsync(id);
-        return s == null ? "Unknown" : $"{s.Project}.{s.Stage}.{s.TaskName}";
+        var session = await _db.Sessions.FindAsync(id);
+        if (session == null)
+        {
+            _logger?.LogWarning("Не найдена сессия #{Id}", id);
+            return "Задача не обнаружена";
+        }
+
+        return $"{session.Project}.{session.Stage}.{session.TaskName}";
     }
 
     public async Task SendDailyReportAsync()
     {
         var today = DateTime.Today;
-        var report = await _db.Sessions
-            .Where(s => s.Date == today)
-            .GroupBy(s => new { s.Project, s.Stage, s.TaskName })
-            .Select(g => new DailyReportRow
-            {
-                Project = g.Key.Project,
-                Stage = g.Key.Stage,
-                Task = g.Key.TaskName,
-                Seconds = g.Sum(x => x.DurationSeconds),
-                FirstStart = g.Min(x => x.Start)
-            })
-            .OrderBy(x => x.FirstStart)
-            .ToListAsync();
-        var total = report.Sum(r => r.Seconds);
-        var htmlReportBody = GenerateReportBody(report, true, today, total);
+        var sessions = await GetTodaysSessionsAsync();
+        var htmlReportBody = GenerateReportBody(sessions, true, today);
 
         await _email.SendHtmlAsync(_cfg.TargetEmail, $"📈 TimeBot Report - {today:dd.MM.yyyy}", htmlReportBody);
-        _logger?.LogInformation("HTML отчет отправлен: {Tasks} задач, {Total} ч.", report.Count, total / 3600.0);
+        _logger?.LogInformation("Отчет отправлен: {Tasks} задач", sessions.Count);
     }
 
     public async Task FinalizeDayAsync()
@@ -264,15 +320,23 @@ public class TrackingLogic
         return true;
     }
 
-    private string GenerateReportBody(List<DailyReportRow> report, bool needFullReport, DateTime? today = null, long? total = null)
+    private async Task<List<TaskSession>> GetTodaysSessionsAsync()
+    {
+        return await _db.Sessions
+            .Where(s => s.Date == DateTime.Today)
+            .OrderBy(s => s.Id)
+            .ToListAsync();
+    }
+
+    private string GenerateReportBody(List<TaskSession> sessions, bool needFullReport, DateTime? today = null, long? total = null)
     {
         today ??= DateTime.Today;
-        total ??= report.Sum(r => r.Seconds);
 
         var htmlTable = new StringBuilder();
-        htmlTable.AppendLine("<table width: 100%; font-family: Arial, sans-serif;'>");
+        htmlTable.AppendLine("<table style='width: 100%; font-family: Arial, sans-serif;'>");
         htmlTable.AppendLine("  <thead>");
         htmlTable.AppendLine("    <tr style='background-color: #4CAF50; color: white;'>");
+        htmlTable.AppendLine("      <th style='width: 50px;'>#</th>");
         htmlTable.AppendLine("      <th>Проект</th>");
         htmlTable.AppendLine("      <th>Этап проекта</th>");
         htmlTable.AppendLine("      <th>Описание работ</th>");
@@ -281,21 +345,26 @@ public class TrackingLogic
         htmlTable.AppendLine("  </thead>");
         htmlTable.AppendLine("  <tbody>");
 
-        foreach (var item in report)
+        var rowNumber = 0;
+        foreach (var session in sessions)
         {
-            var hours = item.Seconds / 3600.0;
+            rowNumber++;
+            var hours = session.DurationSeconds / 3600.0;
+
             htmlTable.AppendLine("    <tr>");
-            htmlTable.AppendLine($"      <td>{System.Net.WebUtility.HtmlEncode(item.Project)}</td>");
-            htmlTable.AppendLine($"      <td>{System.Net.WebUtility.HtmlEncode(item.Stage)}</td>");
-            htmlTable.AppendLine($"      <td>{System.Net.WebUtility.HtmlEncode(item.Task)}</td>");
+            htmlTable.AppendLine($"      <td style='color:#666;font-weight:bold;'>#{rowNumber}</td>");
+            htmlTable.AppendLine($"      <td>{System.Net.WebUtility.HtmlEncode(session.Project)}</td>");
+            htmlTable.AppendLine($"      <td>{System.Net.WebUtility.HtmlEncode(session.Stage)}</td>");
+            htmlTable.AppendLine($"      <td>{System.Net.WebUtility.HtmlEncode(session.TaskName)}</td>");
             htmlTable.AppendLine($"      <td style='text-align: right;'>{hours:F2} ч.</td>");
             htmlTable.AppendLine("    </tr>");
         }
 
         if (needFullReport)
         {
+            total ??= sessions.Sum(s => s.DurationSeconds);
             htmlTable.AppendLine("    <tr style='background-color: #f2f2f2; font-weight: bold;'>");
-            htmlTable.AppendLine("      <td colspan='3' style='text-align: right;'>ИТОГО:</td>");
+            htmlTable.AppendLine("      <td colspan='4' style='text-align: right;'>ИТОГО:</td>");
             htmlTable.AppendLine($"      <td style='text-align: right;'>{total / 3600.0:F2} ч.</td>");
             htmlTable.AppendLine("    </tr>");
         }
@@ -316,8 +385,10 @@ public class TrackingLogic
         fullHtml.AppendLine("  </style>");
         fullHtml.AppendLine("</head>");
         fullHtml.AppendLine("<body>");
+
         if (needFullReport)
             fullHtml.AppendLine($"  <h2>📊 Отчет за {today:dd.MM.yyyy}</h2>");
+
         fullHtml.AppendLine($"  {htmlTable}");
         fullHtml.AppendLine("</body>");
         fullHtml.AppendLine("</html>");

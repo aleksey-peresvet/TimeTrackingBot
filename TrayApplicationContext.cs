@@ -23,8 +23,8 @@ public class TrayApplicationContext : ApplicationContext
 
         var baseDir = AppContext.BaseDirectory;
         var logPath = Path.Combine(baseDir, "logs", "bot.log");
-
         var contextMenu = new ContextMenuStrip();
+        
         var showItem = new ToolStripMenuItem("Показать лог") { Font = new Font("Segoe UI", 9F, FontStyle.Bold) };
         showItem.Click += (s, e) => ShowLog(logPath);
 
@@ -45,8 +45,9 @@ public class TrayApplicationContext : ApplicationContext
         contextMenu.Items.Add(exitItem);
 
         _trayIcon.ContextMenuStrip = contextMenu;
-        _trayIcon.MouseDoubleClick += (s, e) => {
-            if (e.Button == MouseButtons.Left) 
+        _trayIcon.MouseDoubleClick += (s, e) =>
+        {
+            if (e.Button == MouseButtons.Left)
                 ShowLog(logPath);
         };
 
@@ -72,20 +73,11 @@ public class TrayApplicationContext : ApplicationContext
             using var scope = _host.Services.CreateScope();
             var logic = scope.ServiceProvider.GetRequiredService<TrackingLogic>();
             await logic.SendDailyReportAsync();
-
-            _trayIcon.ShowBalloonTip(
-                2000,
-                "TimeBot",
-                "Отчёт отправлен на почту",
-                ToolTipIcon.Info);
+            _trayIcon.ShowBalloonTip(2000, "TimeBot", "Отчёт отправлен на почту", ToolTipIcon.Info);
         }
         catch (Exception ex)
         {
-            _trayIcon.ShowBalloonTip(
-                2000,
-                "TimeBot — Ошибка",
-                $"Не удалось отправить отчёт: {ex.Message}",
-                ToolTipIcon.Error);
+            _trayIcon.ShowBalloonTip(2000, "TimeBot — Ошибка", $"Не удалось отправить отчёт: {ex.Message}", ToolTipIcon.Error);
         }
     }
 
@@ -101,21 +93,12 @@ public class TrayApplicationContext : ApplicationContext
             {
                 state.IsPaused = !state.IsPaused;
                 await db.SaveChangesAsync();
-
-                _trayIcon.ShowBalloonTip(
-                    2000,
-                    "TimeBot",
-                    state.IsPaused ? "Учёт приостановлен" : "▶️ Учёт возобновлён",
-                    ToolTipIcon.Info);
+                _trayIcon.ShowBalloonTip(2000, "TimeBot", state.IsPaused ? "Учёт приостановлен" : "▶️ Учёт возобновлён", ToolTipIcon.Info);
             }
         }
         catch (Exception ex)
         {
-            _trayIcon.ShowBalloonTip(
-                2000,
-                "TimeBot — Ошибка",
-                ex.Message,
-                ToolTipIcon.Error);
+            _trayIcon.ShowBalloonTip(2000, "TimeBot — Ошибка", ex.Message, ToolTipIcon.Error);
         }
     }
 
@@ -126,12 +109,23 @@ public class TrayApplicationContext : ApplicationContext
         try
         {
             using var scope = _host.Services.CreateScope();
-            var logic = scope.ServiceProvider.GetRequiredService<TrackingLogic>();
-            await logic.FinalizeDayAsync();
+            var db = scope.ServiceProvider.GetRequiredService<AppDb>();
+            var state = await db.States.FindAsync(1);
+
+            if (state != null && state.ActiveSessionId.HasValue)
+            {
+                var session = await db.Sessions.FindAsync(state.ActiveSessionId.Value);
+                if (session != null)
+                {
+                    session.DurationSeconds += (long)(DateTime.Now - session.End).TotalSeconds;
+                    session.End = DateTime.Now;
+                    await db.SaveChangesAsync();
+                }
+            }
         }
         catch (Exception ex)
         {
-            _logger?.LogError(ex, "Ошибка при финальном отчёте");
+            _logger?.LogError(ex, "Ошибка при сохранении состояния");
         }
 
         await _host.StopAsync();
@@ -141,7 +135,9 @@ public class TrayApplicationContext : ApplicationContext
     protected override void Dispose(bool disposing)
     {
         if (disposing)
+        {
             _trayIcon.Dispose();
+        }
 
         base.Dispose(disposing);
     }

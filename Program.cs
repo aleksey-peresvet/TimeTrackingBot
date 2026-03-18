@@ -1,4 +1,4 @@
-using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.EntityFrameworkCore;
 using TimeTrackerBot;
 
 internal class Program
@@ -43,8 +43,9 @@ internal class Program
         {
             var db = scope.ServiceProvider.GetRequiredService<AppDb>();
             db.Database.EnsureCreated();
-            
-            await RecoverActiveSessionAsync(db);
+
+            var options = host.Services.GetService<BotConfig>();
+            await RecoverActiveSessionAsync(db, options?.WorkEnd ?? TimeSpan.FromHours(18));
         }
 
         await host.StartAsync();
@@ -61,24 +62,40 @@ internal class Program
         }
     }
 
-    static async Task RecoverActiveSessionAsync(AppDb db)
+    static async Task RecoverActiveSessionAsync(AppDb db, TimeSpan workEnd)
     {
         var state = await db.States.FindAsync(1);
-        if (state?.ActiveSessionId.HasValue == true)
+        if (state == null || !state.ActiveSessionId.HasValue)
+            return;
+
+        var session = await db.Sessions.FindAsync(state.ActiveSessionId.Value);
+        if (session == null)
         {
-            var session = await db.Sessions.FindAsync(state.ActiveSessionId.Value);
-            if (session != null)
+            state.ActiveSessionId = null;
+            await db.SaveChangesAsync();
+            return;
+        }
+
+        if (session.Date != DateTime.Today)
+        {
+            var workEndToday = session.Date.Add(workEnd);
+            if (session.End < workEndToday)
             {
-                var delta = (long)(DateTime.Now - session.End).TotalSeconds;
-                if (delta > 0)
-                {
-                    session.DurationSeconds += delta;
-                    session.End = DateTime.Now;
-                    await db.SaveChangesAsync();
-                }
+                session.End = workEndToday;
+                session.DurationSeconds = (long)(session.End - session.Start).TotalSeconds;
             }
 
             state.ActiveSessionId = null;
+            await db.SaveChangesAsync();
+
+            return;
+        }
+
+        var delta = (long)(DateTime.Now - session.End).TotalSeconds;
+        if (delta > 0)
+        {
+            session.DurationSeconds += delta;
+            session.End = DateTime.Now;
             await db.SaveChangesAsync();
         }
     }

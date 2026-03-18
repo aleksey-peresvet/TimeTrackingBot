@@ -80,13 +80,15 @@ public class MailKitEmailService : IEmailService
         await imap.AuthenticateAsync(_cfg.Login, _cfg.Password);
         await imap.Inbox.OpenAsync(FolderAccess.ReadOnly);
 
-        var uids = await imap.Inbox.SearchAsync(SearchQuery.SentSince(after));
+        var uids = await imap.Inbox.SearchAsync(SearchQuery.DeliveredAfter(after));
+
         _logger?.LogDebug("Найдено писем за сегодня: {Count}", uids.Count);
 
         foreach (var uid in uids.Reverse())
         {
             var msg = await imap.Inbox.GetMessageAsync(uid);
             var msgDate = msg.Date.LocalDateTime;
+
             if (msgDate <= after)
             {
                 _logger?.LogDebug("Пропуск (старое): {Date} <= {After}", msgDate, after);
@@ -102,7 +104,7 @@ public class MailKitEmailService : IEmailService
                 continue;
             }
 
-            var subject = msg.Subject?.ToLowerInvariant() ?? "";
+            var subject = msg.Subject?.ToLowerInvariant() ?? string.Empty;
             if (subject.Contains("не доставлено") || subject.Contains("delivery failed") ||
                 subject.Contains("undeliverable") || subject.Contains("возврат") ||
                 subject.Contains("не может быть отправлено"))
