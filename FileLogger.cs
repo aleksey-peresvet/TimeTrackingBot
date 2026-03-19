@@ -5,8 +5,8 @@ namespace TimeTrackerBot;
 public class FileLogger : ILogger
 {
     private readonly string _filePath;
-    private readonly object _lock = new();
     private readonly string _categoryName;
+    private DateTime _lastRotationCheck = DateTime.MinValue;
 
     public FileLogger(string filePath, string categoryName)
     {
@@ -22,9 +22,19 @@ public class FileLogger : ILogger
         Exception? exception, Func<TState, Exception?, string> formatter)
     {
 
-        if (!IsEnabled(logLevel)) return;
+        if (!IsEnabled(logLevel))
+            return;
+
+        if (DateTime.Now - _lastRotationCheck >= TimeSpan.FromHours(1))
+        {
+            Program.EnsureLogClearing(_filePath);
+            _lastRotationCheck = DateTime.Now;
+        }
 
         var message = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{logLevel,8}] [{_categoryName}] {formatter(state, exception)}";
+
+        if (exception != null)
+            message += Environment.NewLine + exception.InnerException?.Message ?? exception.Message;
 
         try
         {

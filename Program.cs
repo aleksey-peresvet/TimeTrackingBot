@@ -11,6 +11,7 @@ internal class Program
         var connectionString = $"Data Source={dbPath}";
 
         Directory.CreateDirectory(Path.GetDirectoryName(logPath)!);
+        EnsureLogClearing(logPath);
 
         var builder = Host.CreateDefaultBuilder(args)
             .ConfigureLogging(logging =>
@@ -62,7 +63,7 @@ internal class Program
         }
     }
 
-    static async Task RecoverActiveSessionAsync(AppDb db, TimeSpan workEnd)
+    private static async Task RecoverActiveSessionAsync(AppDb db, TimeSpan workEnd)
     {
         var state = await db.States.FindAsync(1);
         if (state == null || !state.ActiveSessionId.HasValue)
@@ -98,5 +99,21 @@ internal class Program
             session.End = DateTime.Now;
             await db.SaveChangesAsync();
         }
+    }
+
+    public static async void EnsureLogClearing(string logPath)
+    {
+        if (!File.Exists(logPath))
+            return;
+
+        var lastWrite = File.GetLastWriteTime(logPath).Date;
+        if (lastWrite >= DateTime.Today)
+            return;
+
+        try
+        {
+            await File.WriteAllTextAsync(logPath, string.Empty);
+        }
+        catch { }
     }
 }
