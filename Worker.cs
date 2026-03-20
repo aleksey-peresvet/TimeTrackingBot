@@ -32,7 +32,7 @@ public class TimeTrackingWorker : BackgroundService
                     _lastReportDate = now.Date;
                     _logger?.LogInformation("Автоотчет за день отправлен");
 
-                    await Task.Delay(TimeSpan.FromHours(12), stop);
+                    await Task.Delay(TimeSpan.FromHours(24) - now.TimeOfDay + _cfg.WorkStart, stop);
                     continue;
                 }
 

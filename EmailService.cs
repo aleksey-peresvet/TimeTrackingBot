@@ -140,7 +140,7 @@ public class MailKitEmailService : IEmailService
                 continue;
             }
 
-            _logger?.LogInformation("Письмо обработано: \"{Body}\"", body.Substring(0, Math.Min(50, body.Length)));
+            _logger?.LogInformation("Письмо обработано: \"{Body}\"", body);
 
             await imap.DisconnectAsync(true);
             return (true, body, msgDate);
