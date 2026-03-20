@@ -166,10 +166,10 @@ public class TrackingLogic
                     await CloseSessionAsync(state, received);
                 }
 
-                
+                previousSession.End = received;
                 state.ActiveSessionId = previousSession.Id;
                 state.IsPaused = false;
-                
+
                 await _db.SaveChangesAsync();
                 await _email.SendAsync(_cfg.TargetEmail, "✅ TimeBot", $"Возобновлён учёт: {previousSession.Project}.{previousSession.Stage}.{previousSession.TaskName}");
             }
@@ -247,7 +247,7 @@ public class TrackingLogic
         var session = await _db.Sessions.FirstOrDefaultAsync(s => s.Id == sessionId);
         if (session != null && session.End < now)
         {
-            var delta = (long)(now - session.End).TotalSeconds;
+            var delta = CalculateWorkDuration(session.End, now);
             if (delta > 0)
             {
                 session.DurationSeconds += delta;
@@ -389,5 +389,33 @@ public class TrackingLogic
         fullHtml.AppendLine("</html>");
 
         return fullHtml.ToString();
+    }
+
+    private long CalculateWorkDuration(DateTime start, DateTime end)
+    {
+        if (start >= end || start.Date != end.Date) 
+            return 0;
+
+        var day = start.Date;
+        var workStart = day.Add(_cfg.WorkStart);
+        var workEnd = day.Add(_cfg.WorkEnd);
+        var lunchStart = day.Add(_cfg.LunchStart);
+        var lunchEnd = day.Add(_cfg.LunchEnd);
+        var effectiveStart = start < workStart ? workStart : start;
+        var effectiveEnd = end > workEnd ? workEnd : end;
+
+        if (effectiveStart >= effectiveEnd) 
+            return 0;
+
+        var totalSeconds = (long)(effectiveEnd - effectiveStart).TotalSeconds;
+
+        if (effectiveStart < lunchEnd && effectiveEnd > lunchStart)
+        {
+            var overlapStart = effectiveStart < lunchStart ? lunchStart : effectiveStart;
+            var overlapEnd = effectiveEnd > lunchEnd ? lunchEnd : effectiveEnd;
+            totalSeconds -= (long)(overlapEnd - overlapStart).TotalSeconds;
+        }
+
+        return Math.Max(0, totalSeconds);
     }
 }
