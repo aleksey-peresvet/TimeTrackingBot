@@ -52,16 +52,6 @@ public class TrackingLogic
             }
         }
 
-        if (state.IsPaused)
-        {
-            _logger?.LogDebug("[STATE] На паузе");
-
-            if (state.ActiveSessionId.HasValue)
-                await UpdateSessionDurationAsync(state.ActiveSessionId.Value, now);
-
-            return;
-        }
-
         _logger?.LogDebug("Проверка почты после {LastPrompt}", state.LastPromptTime);
         var (hasResponse, answer, received) = await _email.CheckNewAsync(_cfg.TargetEmail, state.LastPromptTime);
         _logger?.LogDebug("Результат: {0}, Ответ=\"{1}\"", hasResponse ? "Есть ответное письмо" : "Нет ответного письма", answer);
@@ -71,6 +61,24 @@ public class TrackingLogic
             if (hasResponse && !string.IsNullOrEmpty(answer))
             {
                 await HandleResponseAsync(state, answer.Trim(), received);
+            }
+            else if (state.IsPaused)
+            {
+                _logger?.LogDebug("[STATE] На паузе");
+
+                if (state.LastPromptTime.Date < DateTime.Today)
+                {
+                    await _email.SendAsync(_cfg.TargetEmail, "⏸️ TimeBot", "Учёт времени приостановлен. Напишите «продолжи» для возобновления.");
+                    _logger?.LogDebug("Отправлено напоминание о паузе");
+
+                    state.LastPromptTime = now;
+                    await _db.SaveChangesAsync();
+                }
+                
+                if (state.ActiveSessionId.HasValue)
+                    await UpdateSessionDurationAsync(state.ActiveSessionId.Value, now);
+
+                return;
             }
             else
             {
@@ -393,7 +401,7 @@ public class TrackingLogic
 
     private long CalculateWorkDuration(DateTime start, DateTime end)
     {
-        if (start >= end || start.Date != end.Date) 
+        if (start >= end || start.Date != end.Date)
             return 0;
 
         var day = start.Date;
@@ -404,7 +412,7 @@ public class TrackingLogic
         var effectiveStart = start < workStart ? workStart : start;
         var effectiveEnd = end > workEnd ? workEnd : end;
 
-        if (effectiveStart >= effectiveEnd) 
+        if (effectiveStart >= effectiveEnd)
             return 0;
 
         var totalSeconds = (long)(effectiveEnd - effectiveStart).TotalSeconds;
