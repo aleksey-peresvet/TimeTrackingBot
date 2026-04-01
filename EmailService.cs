@@ -198,7 +198,7 @@ public class MailKitEmailService : IEmailService
 
         var firstLine = text.Split('\n')[0].Trim();
 
-        return firstLine.Length > 100 ? firstLine.Substring(0, 100) : firstLine;
+        return firstLine;
     }
 
     private string ConvertHtmlToText(string html)
