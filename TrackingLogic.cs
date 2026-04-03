@@ -31,19 +31,11 @@ public class TrackingLogic
             return;
         }
 
-        var state = await _db.States.FirstOrDefaultAsync();
-        if (state == null)
-        {
-            state = new UserState { Id = 1, LastPromptTime = DateTime.UtcNow.AddHours(-1) };
-            _db.States.Add(state);
-            await _db.SaveChangesAsync();
-
-            _logger?.LogDebug("[STATE] Создана новая запись состояния");
-        }
+        var state = await GetOrCreateUserStateAsync();
 
         if (state.ActiveSessionId.HasValue)
         {
-            var session = await _db.Sessions.FirstOrDefaultAsync(s => s.Id == state.ActiveSessionId.Value);
+            var session = await _db.Sessions.FindAsync(state.ActiveSessionId.Value);
             if (session != null && session.Date != DateTime.Today)
             {
                 _logger?.LogWarning("Обнаружена сессия #{Id} за предыдущий день ({Date}). Производится сброс сессии.", session.Id, session.Date);
@@ -98,6 +90,21 @@ public class TrackingLogic
         await _db.SaveChangesAsync();
 
         _logger?.LogDebug("[TICK] Завершено");
+    }
+
+    private async Task<UserState> GetOrCreateUserStateAsync()
+    {
+        var state = await _db.States.FindAsync(1);
+        if (state == null)
+        {
+            state = new UserState { Id = 1, LastPromptTime = DateTime.UtcNow.AddHours(-1) };
+            _db.States.Add(state);
+            await _db.SaveChangesAsync();
+
+            _logger?.LogDebug("[STATE] Создана новая запись состояния");
+        }
+
+        return state;
     }
 
     private async Task HandleResponseAsync(UserState state, string answer, DateTime received)
@@ -162,10 +169,9 @@ public class TrackingLogic
 
                 if (state.ActiveSessionId.HasValue)
                 {
-                    var currentSession = await _db.Sessions.FirstOrDefaultAsync(s => s.Id == state.ActiveSessionId.Value);
-                    if (currentSession != null && currentSession.Id == previousSession.Id)
+                    if (previousSession.Id == state.ActiveSessionId.Value)
                     {
-                        await _email.SendAsync(_cfg.TargetEmail, "✅ TimeBot", $"Продолжаем: {currentSession.Project}.{currentSession.Stage}.{currentSession.TaskName}");
+                        await _email.SendAsync(_cfg.TargetEmail, "✅ TimeBot", $"Продолжаем: {previousSession.Project}.{previousSession.Stage}.{previousSession.TaskName}");
                         _logger?.LogDebug("Клик по той же задаче, сессия не пересоздаётся: #{Id}", state.ActiveSessionId.Value);
 
                         return;
@@ -206,7 +212,6 @@ public class TrackingLogic
 
         _db.Sessions.Add(session);
         await _db.SaveChangesAsync();
-        await _db.Entry(session).ReloadAsync();
 
         state.ActiveSessionId = session.Id;
         await _db.SaveChangesAsync();
@@ -252,7 +257,7 @@ public class TrackingLogic
         if (sessionId < 1)
             return;
 
-        var session = await _db.Sessions.FirstOrDefaultAsync(s => s.Id == sessionId);
+        var session = await _db.Sessions.FindAsync(sessionId);
         if (session != null && session.End < now)
         {
             var delta = CalculateWorkDuration(session.End, now);
@@ -285,7 +290,7 @@ public class TrackingLogic
             return "Задача не обнаружена";
         }
 
-        var session = await _db.Sessions.FirstOrDefaultAsync(s => s.Id == id);
+        var session = await _db.Sessions.FindAsync(id);
         if (session == null)
         {
             _logger?.LogWarning("Не найдена сессия #{Id}", id);
@@ -309,7 +314,7 @@ public class TrackingLogic
     {
         await SendDailyReportAsync();
 
-        var state = await _db.States.FirstOrDefaultAsync();
+        var state = await GetOrCreateUserStateAsync();
         if (state != null && state.ActiveSessionId.HasValue)
             await CloseSessionAsync(state, DateTime.Now);
     }
