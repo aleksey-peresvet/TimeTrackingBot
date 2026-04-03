@@ -356,9 +356,9 @@ public class TrackingLogic
 
             htmlTable.AppendLine("    <tr>");
             htmlTable.AppendLine($"      <td style='color:#666;font-weight:bold;'>#{rowNumber}</td>");
-            htmlTable.AppendLine($"      <td>{System.Net.WebUtility.HtmlEncode(session.Project)}</td>");
-            htmlTable.AppendLine($"      <td>{System.Net.WebUtility.HtmlEncode(session.Stage)}</td>");
-            htmlTable.AppendLine($"      <td>{System.Net.WebUtility.HtmlEncode(session.TaskName)}</td>");
+            htmlTable.AppendLine($"      <td style='max-width: 200px'>{System.Net.WebUtility.HtmlEncode(session.Project)}</td>");
+            htmlTable.AppendLine($"      <td style='max-width: 200px'>{System.Net.WebUtility.HtmlEncode(session.Stage)}</td>");
+            htmlTable.AppendLine($"      <td style='max-width: 300px'>{System.Net.WebUtility.HtmlEncode(session.TaskName)}</td>");
             htmlTable.AppendLine($"      <td style='text-align: right;'>{hours:F2} ч.</td>");
             htmlTable.AppendLine("    </tr>");
         }
@@ -382,7 +382,7 @@ public class TrackingLogic
         fullHtml.AppendLine("  <meta charset='utf-8'>");
         fullHtml.AppendLine("  <style>");
         fullHtml.AppendLine("    table { border-collapse: collapse; width: 100%; }");
-        fullHtml.AppendLine("    th, td { border: 1px solid #ddd; padding: 8px; }");
+        fullHtml.AppendLine("    th, td { border: 1px solid #ddd; padding: 8px; word-wrap: break-word; }");
         fullHtml.AppendLine("    body {{ font-family: Arial, sans-serif; margin: 20px; }}");
         fullHtml.AppendLine("    h2 {{ color: #333; }}");
         fullHtml.AppendLine("  </style>");
