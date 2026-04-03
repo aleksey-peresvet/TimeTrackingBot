@@ -42,7 +42,15 @@ public class AppDb : DbContext
     
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
-        modelBuilder.Entity<TaskSession>().HasIndex(s => s.Date);
-        modelBuilder.Entity<TaskSession>().HasIndex(s => s.Start);
+        modelBuilder.Entity<TaskSession>(entity =>
+        {
+            entity.HasIndex(s => s.Date);
+            entity.HasIndex(s => s.Start);
+        });
+        
+        modelBuilder.Entity<UserState>(entity =>
+        {
+            entity.HasIndex(s => s.Id).IsUnique();
+        });
     }
 }
