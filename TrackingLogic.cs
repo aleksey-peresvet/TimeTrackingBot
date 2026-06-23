@@ -66,7 +66,7 @@ public class TrackingLogic
                     state.LastPromptTime = now;
                     await _db.SaveChangesAsync();
                 }
-                
+
                 if (state.ActiveSessionId.HasValue)
                     await UpdateSessionDurationAsync(state.ActiveSessionId.Value, now);
 
@@ -112,7 +112,7 @@ public class TrackingLogic
         var cmd = answer.ToLowerInvariant();
         if (cmd is "отчет" or "отчёт" or "report" or "/report" or "/стат" or "/отчет")
         {
-            await SendDailyReportAsync();
+            await SendDailyReportAsync(state);
             return;
         }
 
@@ -242,7 +242,7 @@ public class TrackingLogic
 
         if (sessions.Any())
         {
-            var htmlReportBody = GenerateReportBody(sessions, false, today);
+            var htmlReportBody = GenerateReportBody(sessions, false, today, activeSessionId: state?.ActiveSessionId);
             msg.AppendLine($"<br>📂 Сегодня уже были:<br>{htmlReportBody}");
         }
 
@@ -258,17 +258,17 @@ public class TrackingLogic
             return;
 
         var session = await _db.Sessions.FindAsync(sessionId);
-        if (session != null && session.End < now)
-        {
-            var delta = CalculateWorkDuration(session.End, now);
-            if (delta > 0)
-            {
-                session.DurationSeconds += delta;
-                session.End = now;
-                await _db.SaveChangesAsync();
+        if (session == null || session.End >= now)
+            return;
 
-                _logger?.LogDebug("Обновлена трудоёмкость: +{Seconds}с для сессии #{Id}", delta, sessionId);
-            }
+        var delta = CalculateWorkDuration(session.End, now);
+        if (delta > 0)
+        {
+            session.DurationSeconds += delta;
+            session.End = now;
+            await _db.SaveChangesAsync();
+
+            _logger?.LogDebug("Обновлена трудоёмкость: +{Seconds}с для сессии #{Id}", delta, sessionId);
         }
     }
 
@@ -300,11 +300,13 @@ public class TrackingLogic
         return $"{session.Project}.{session.Stage}.{session.TaskName}";
     }
 
-    public async Task SendDailyReportAsync()
+    public async Task SendDailyReportAsync(UserState? state = null)
     {
+        state ??= await GetOrCreateUserStateAsync();
+
         var today = DateTime.Today;
         var sessions = await GetTodaysSessionsAsync();
-        var htmlReportBody = GenerateReportBody(sessions, true, today);
+        var htmlReportBody = GenerateReportBody(sessions, true, today, activeSessionId: state?.ActiveSessionId);
 
         await _email.SendHtmlAsync(_cfg.TargetEmail, $"📈 TimeBot Report - {today:dd.MM.yyyy}", htmlReportBody);
         _logger?.LogInformation("Отчет отправлен: {Tasks} задач", sessions.Count);
@@ -312,11 +314,17 @@ public class TrackingLogic
 
     public async Task FinalizeDayAsync()
     {
-        await SendDailyReportAsync();
-
         var state = await GetOrCreateUserStateAsync();
-        if (state != null && state.ActiveSessionId.HasValue)
-            await CloseSessionAsync(state, DateTime.Now);
+        var now = DateTime.Now;
+
+        if (state.ActiveSessionId.HasValue)
+        {
+            var workEndToday = DateTime.Today.Add(_cfg.WorkEnd);
+            var closeTime = now < workEndToday ? workEndToday : now;
+            await CloseSessionAsync(state, closeTime);
+        }
+
+        await SendDailyReportAsync(state);
     }
 
     private bool IsWorkTime(DateTime now)
@@ -336,7 +344,7 @@ public class TrackingLogic
             .ToListAsync();
     }
 
-    private string GenerateReportBody(List<TaskSession> sessions, bool needFullReport, DateTime? today = null, long? total = null)
+    private string GenerateReportBody(List<TaskSession> sessions, bool needFullReport, DateTime? today = null, int? activeSessionId = null)
     {
         today ??= DateTime.Today;
 
@@ -354,26 +362,34 @@ public class TrackingLogic
         htmlTable.AppendLine("  <tbody>");
 
         var rowNumber = 0;
+        var totalDuration = 0L;
+
         foreach (var session in sessions)
         {
             rowNumber++;
-            var hours = session.DurationSeconds / 3600.0;
+
+            var isSessionActive = activeSessionId.HasValue && session.Id == activeSessionId.Value;
+            var sessionDuration = isSessionActive ? CalculateWorkDuration(session.End, DateTime.Now) + session.DurationSeconds : session.DurationSeconds;
+            var sessionHours = Math.Round(sessionDuration / 3600.0, 2, MidpointRounding.AwayFromZero);
+
+            if (needFullReport)
+                totalDuration += sessionDuration;
 
             htmlTable.AppendLine("    <tr>");
             htmlTable.AppendLine($"      <td style='color:#666;font-weight:bold;'>#{rowNumber}</td>");
             htmlTable.AppendLine($"      <td style='max-width: 200px'>{System.Net.WebUtility.HtmlEncode(session.Project)}</td>");
             htmlTable.AppendLine($"      <td style='max-width: 200px'>{System.Net.WebUtility.HtmlEncode(session.Stage)}</td>");
             htmlTable.AppendLine($"      <td style='max-width: 300px'>{System.Net.WebUtility.HtmlEncode(session.TaskName)}</td>");
-            htmlTable.AppendLine($"      <td style='text-align: right;'>{hours:F2} ч.</td>");
+            htmlTable.AppendLine($"      <td style='text-align: right;'>{sessionHours:F2} ч.</td>");
             htmlTable.AppendLine("    </tr>");
         }
 
         if (needFullReport)
         {
-            total ??= sessions.Sum(s => s.DurationSeconds);
+            var totalHours = Math.Round(totalDuration / 3600.0, 2, MidpointRounding.AwayFromZero);
             htmlTable.AppendLine("    <tr style='background-color: #f2f2f2; font-weight: bold;'>");
             htmlTable.AppendLine("      <td colspan='4' style='text-align: right;'>ИТОГО:</td>");
-            htmlTable.AppendLine($"      <td style='text-align: right;'>{total / 3600.0:F2} ч.</td>");
+            htmlTable.AppendLine($"      <td style='text-align: right;'>{totalHours:F2} ч.</td>");
             htmlTable.AppendLine("    </tr>");
         }
 
@@ -420,15 +436,15 @@ public class TrackingLogic
         if (effectiveStart >= effectiveEnd)
             return 0;
 
-        var totalSeconds = (long)(effectiveEnd - effectiveStart).TotalSeconds;
+        var totalSeconds = (effectiveEnd - effectiveStart).TotalSeconds;
 
         if (effectiveStart < lunchEnd && effectiveEnd > lunchStart)
         {
             var overlapStart = effectiveStart < lunchStart ? lunchStart : effectiveStart;
             var overlapEnd = effectiveEnd > lunchEnd ? lunchEnd : effectiveEnd;
-            totalSeconds -= (long)(overlapEnd - overlapStart).TotalSeconds;
+            totalSeconds -= (overlapEnd - overlapStart).TotalSeconds;
         }
 
-        return Math.Max(0, totalSeconds);
+        return (long)Math.Round(Math.Max(0, totalSeconds));
     }
 }
