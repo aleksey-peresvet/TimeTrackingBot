@@ -91,6 +91,27 @@ public class MailKitEmailService : IEmailService
 
         using var smtp = new SmtpClient();
 
+        smtp.ServerCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
+        {
+            if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None)
+                return true;
+
+            if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.RemoteCertificateChainErrors && chain != null)
+            {
+                var allowedStatuses = new[]
+                {
+                    System.Security.Cryptography.X509Certificates.X509ChainStatusFlags.RevocationStatusUnknown,
+                    System.Security.Cryptography.X509Certificates.X509ChainStatusFlags.OfflineRevocation
+                };
+
+                if (chain.ChainStatus.All(s => allowedStatuses.Contains(s.Status)))
+                    return true;
+            }
+
+            _logger?.LogWarning("Ошибка SSL-сертификата SMTP: {Errors}", sslPolicyErrors);
+            return false;
+        };
+
         try
         {
             _logger?.LogDebug("Подключение к SMTP серверу {Server}:{Port}", _cfg.SmtpServer, _cfg.SmtpPort);
@@ -189,7 +210,7 @@ public class MailKitEmailService : IEmailService
         }
 
         _logger?.LogError(lastException, "Все попытки {Operation} исчерпаны", operationName);
-        
+
         throw new EmailConnectionException(
             $"Не удалось выполнить операцию '{operationName}' после {MaxRetryAttempts} попыток",
             lastException);
@@ -197,7 +218,7 @@ public class MailKitEmailService : IEmailService
 
     private bool IsTransientError(Exception? ex)
     {
-        if (ex == null) 
+        if (ex == null)
             return false;
 
         return ex switch
@@ -217,6 +238,27 @@ public class MailKitEmailService : IEmailService
             after, after.ToUniversalTime(), expectedFrom);
 
         using var imap = new ImapClient();
+
+        imap.ServerCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
+        {
+            if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None)
+                return true;
+
+            if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.RemoteCertificateChainErrors && chain != null)
+            {
+                var allowedStatuses = new[]
+                {
+                    System.Security.Cryptography.X509Certificates.X509ChainStatusFlags.RevocationStatusUnknown,
+                    System.Security.Cryptography.X509Certificates.X509ChainStatusFlags.OfflineRevocation
+                };
+
+                if (chain.ChainStatus.All(s => allowedStatuses.Contains(s.Status)))
+                    return true;
+            }
+
+            _logger?.LogWarning("Ошибка SSL-сертификата IMAP: {Errors}", sslPolicyErrors);
+            return false;
+        };
 
         try
         {
